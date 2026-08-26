@@ -431,6 +431,7 @@ class ParakeetWsServer {
     let serverDone = false;
     let truncated = false;
     let lastEmitted = "";
+    let lastSnapshotSignature = "";
 
     const ws = new WebSocket(`ws://127.0.0.1:${this.port}`);
 
@@ -505,10 +506,17 @@ class ParakeetWsServer {
         ws.close();
         return;
       }
-      const text = results.push(message);
-      if (!closed && text && text !== lastEmitted) {
+      const result = results.push(message);
+      const text = result.text;
+      const snapshotSignature = JSON.stringify(result.finalizedSegments);
+      if (
+        !closed &&
+        text &&
+        (text !== lastEmitted || snapshotSignature !== lastSnapshotSignature)
+      ) {
         lastEmitted = text;
-        onUpdate?.(text);
+        lastSnapshotSignature = snapshotSignature;
+        onUpdate?.(text, result);
       }
     });
 

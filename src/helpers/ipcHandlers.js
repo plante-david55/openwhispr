@@ -605,6 +605,7 @@ class IPCHandlers {
     this._textEditHandler = null;
     this._activeRecordingPipeline = null;
     this._onboardingDemoSession = null;
+    this.cliBridge = null;
     this.audioStorageManager = new AudioStorageManager();
     this._retentionCleanupInterval = null;
     this._retentionSettings = { ...DEFAULT_RETENTION_SETTINGS }; // Synced from renderer
@@ -653,6 +654,44 @@ class IPCHandlers {
         this._syncStartupEnv({}, ["WHISPER_VULKAN_DEVICE"]);
       });
     }
+  }
+
+  setCliBridge(cliBridge) {
+    this.cliBridge = cliBridge;
+  }
+
+  getSpeechProviderModel(modelId) {
+    const model = require("../models/modelRegistryData.json").parakeetModels?.[modelId];
+    if (!model) return null;
+    return {
+      id: modelId,
+      name: model.name,
+      language: model.language,
+      supported_languages: model.supportedLanguages || [],
+      runtime: model.runtime === "online" ? "online" : "offline",
+      downloaded: this.parakeetManager.serverManager.isModelDownloaded(modelId),
+    };
+  }
+
+  getSpeechProviderModels() {
+    const models = require("../models/modelRegistryData.json").parakeetModels || {};
+    return Object.keys(models)
+      .map((modelId) => this.getSpeechProviderModel(modelId))
+      .filter((model) => model.runtime === "online");
+  }
+
+  getSpeechProviderStatus() {
+    return {
+      protocol_version: 1,
+      lifecycle: this.windowManager.getDictationLifecycleState(),
+      server: this.parakeetManager.getServerStatus(),
+      capabilities: {
+        partial_transcripts: true,
+        committed_transcripts: true,
+        incremental_cleanup: true,
+        provider_mode: true,
+      },
+    };
   }
 
   // The dictation slot reports its own changes from the renderer. Slots
@@ -1544,6 +1583,18 @@ class IPCHandlers {
         return;
       }
       this.windowManager.setDictationLifecycleState(state);
+    });
+
+    ipcMain.on("speech-provider-event", (event, payload) => {
+      const dictationWindow = this.windowManager.mainWindow;
+      if (
+        !dictationWindow ||
+        dictationWindow.isDestroyed() ||
+        event.sender !== dictationWindow.webContents
+      ) {
+        return;
+      }
+      this.cliBridge?.publishSpeechEvent(payload);
     });
 
     // Dictionary handlers
@@ -8072,7 +8123,25 @@ class IPCHandlers {
         if (provider === "nvidia" && this.parakeetManager.supportsOnlineStreaming(model)) {
           try {
             const stream = await this.parakeetManager.createOnlineStream(model, {
-              onUpdate: (text) => {
+              onUpdate: (text, snapshot) => {
+                const speechSession = this.cliBridge?.getActiveSpeechSession();
+                if (speechSession) {
+                  const transcript = {
+                    sessionId: speechSession.id,
+                    text,
+                    committedText: snapshot?.committedText || "",
+                    partialText: snapshot?.partialText || "",
+                    finalizedSegments: snapshot?.finalizedSegments || [],
+                  };
+                  this.cliBridge.publishSpeechEvent({
+                    type: "transcript.partial",
+                    ...transcript,
+                  });
+                  const dictationWindow = this.windowManager.mainWindow;
+                  if (dictationWindow && !dictationWindow.isDestroyed()) {
+                    dictationWindow.webContents.send("speech-provider-transcript", transcript);
+                  }
+                }
                 if (gen === dictationPreviewGen && text && dictationPreviewDisplay) {
                   this.windowManager.showTranscriptionPreview(text);
                 }

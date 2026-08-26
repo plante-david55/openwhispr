@@ -42,6 +42,7 @@
     "prebuild:linux": "npm run compile:native && npm run download:whisper-cpp && npm run download:llama-server && npm run download:sherpa-onnx && npm run download:yt-dlp && npm run download:qdrant && npm run download:meeting-aec-helper && npm run download:whisper-vad-model && npm run download:diarization-models -- --output-dir resources/bin/diarization-models",
     "build:linux": "npm run build:renderer && electron-builder --linux",
     "build:linux:appimage": "npm run build:renderer && electron-builder --linux AppImage",
+    "build:linux:foundry": "npm run build:renderer && electron-builder --config electron-builder.foundry.json --linux AppImage",
     "build:linux:deb": "npm run build:renderer && electron-builder --linux deb",
     "build:linux:rpm": "npm run build:renderer && electron-builder --linux rpm",
     "build:linux:tar": "npm run build:renderer && electron-builder --linux tar.gz",

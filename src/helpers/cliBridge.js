@@ -13,11 +13,20 @@ const HOST = "127.0.0.1";
 const BRIDGE_FILE_VERSION = 1;
 const MAX_REQUEST_BODY_BYTES = 1 * 1024 * 1024;
 const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+const SPEECH_EVENT_BUFFER_SIZE = 200;
+const SPEECH_CLEANUP_MODES = new Set(["none", "incremental", "final"]);
+const DEFAULT_STREAMING_MODEL = "parakeet-unified-en-0.6b-streaming-560ms";
 
 const NO_CONTENT = Symbol("CliBridge.NoContent");
 
 function getBridgeFilePath() {
-  return path.join(os.homedir(), ".openwhispr", "cli-bridge.json");
+  const explicitPath = process.env.OPENWHISPR_CLI_BRIDGE_FILE?.trim();
+  if (explicitPath) return path.resolve(explicitPath);
+
+  const channel = process.env.OPENWHISPR_CHANNEL?.trim().toLowerCase();
+  const filename =
+    channel && channel !== "production" ? `cli-bridge-${channel}.json` : "cli-bridge.json";
+  return path.join(os.homedir(), ".openwhispr", filename);
 }
 
 async function findAvailablePort() {
@@ -98,6 +107,10 @@ class CliBridge {
     this.port = null;
     this.token = null;
     this.bridgeFilePath = getBridgeFilePath();
+    this._speechSession = null;
+    this._speechEvents = [];
+    this._speechSequence = 0;
+    this._speechClients = new Set();
     this.routes = this._buildRouteTable();
   }
 
@@ -133,6 +146,11 @@ class CliBridge {
 
   async stop() {
     if (!this.server) return;
+    for (const client of this._speechClients) {
+      clearInterval(client.keepAliveTimer);
+      client.res.end();
+    }
+    this._speechClients.clear();
     await new Promise((resolve) => {
       this.server.close(() => resolve());
     });
@@ -206,6 +224,10 @@ class CliBridge {
     }
 
     try {
+      if (route.stream) {
+        await route.handler({ req, res, params: route.params, query: url.searchParams, body });
+        return;
+      }
       const result = await route.handler({ params: route.params, query: url.searchParams, body });
       if (result === NO_CONTENT) {
         sendNoContent(res);
@@ -227,6 +249,10 @@ class CliBridge {
       sendV1Error(res, 400, "validation_error", err.message);
       return;
     }
+    if (err.code === "CONFLICT") {
+      sendV1Error(res, 409, "conflict", err.message);
+      return;
+    }
     debugLogger.error("CLI bridge route error", { error: err.message }, "cli-bridge");
     sendV1Error(res, 500, "internal_error", err.message || "Internal server error");
   }
@@ -240,12 +266,185 @@ class CliBridge {
     return null;
   }
 
+  getActiveSpeechSession() {
+    return this._speechSession;
+  }
+
+  publishSpeechEvent(payload = {}) {
+    const sessionId = payload.sessionId || payload.session_id || this._speechSession?.id;
+    if (!sessionId || typeof payload.type !== "string") return null;
+    if (!this._speechSession || this._speechSession.id !== sessionId) return null;
+
+    const event = {
+      id: ++this._speechSequence,
+      type: payload.type,
+      session_id: sessionId,
+      timestamp: new Date().toISOString(),
+      ...payload,
+    };
+    delete event.sessionId;
+
+    if (this._speechSession?.id === sessionId) {
+      const nextState = {
+        "dictation.started": "recording",
+        "dictation.processing": "processing",
+        "dictation.stopping": "stopping",
+      }[event.type];
+      if (nextState) this._speechSession.state = nextState;
+    }
+
+    this._speechEvents.push(event);
+    if (this._speechEvents.length > SPEECH_EVENT_BUFFER_SIZE) this._speechEvents.shift();
+
+    const encoded = `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+    for (const client of this._speechClients) {
+      if (!client.sessionId || client.sessionId === sessionId) client.res.write(encoded);
+    }
+
+    if (["dictation.completed", "dictation.cancelled", "dictation.error"].includes(event.type)) {
+      if (this._speechSession?.id === sessionId) this._speechSession = null;
+    }
+    return event;
+  }
+
+  _startSpeechSession(body = {}) {
+    if (this._speechSession) {
+      const err = new Error(`Speech session ${this._speechSession.id} is already active`);
+      err.code = "CONFLICT";
+      throw err;
+    }
+
+    const cleanup = body.cleanup ?? "incremental";
+    if (!SPEECH_CLEANUP_MODES.has(cleanup)) {
+      const err = new Error("'cleanup' must be one of: none, incremental, final");
+      err.code = "VALIDATION";
+      throw err;
+    }
+    if (body.provider != null && body.provider !== "nvidia") {
+      const err = new Error("The speech API currently supports the 'nvidia' provider only");
+      err.code = "VALIDATION";
+      throw err;
+    }
+
+    if (body.model != null && typeof body.model !== "string") {
+      const err = new Error("'model' must be a string");
+      err.code = "VALIDATION";
+      throw err;
+    }
+    if (body.language != null && typeof body.language !== "string") {
+      const err = new Error("'language' must be a string");
+      err.code = "VALIDATION";
+      throw err;
+    }
+    const model = body.model || DEFAULT_STREAMING_MODEL;
+    const modelInfo = this.ipcHandlers.getSpeechProviderModel?.(model);
+    if (!modelInfo || modelInfo.runtime !== "online") {
+      const err = new Error(`'${model}' is not a supported streaming Parakeet model`);
+      err.code = "VALIDATION";
+      throw err;
+    }
+    if (!modelInfo.downloaded) {
+      const err = new Error(`Streaming model '${model}' is not downloaded`);
+      err.code = "VALIDATION";
+      throw err;
+    }
+
+    const id = crypto.randomUUID();
+    const session = {
+      id,
+      state: "starting",
+      provider: "nvidia",
+      model,
+      language: body.language || "en",
+      cleanup,
+      display: body.display === true,
+      persist: body.persist === true,
+      created_at: new Date().toISOString(),
+    };
+    this._speechSession = session;
+
+    const started = this.ipcHandlers.windowManager?.sendStartDictation({
+      providerMode: true,
+      sessionId: id,
+      model,
+      language: session.language,
+      cleanupMode: cleanup,
+      display: session.display,
+      persist: session.persist,
+    });
+    if (started !== true) {
+      this._speechSession = null;
+      const err = new Error("Dictation is busy or the application is not ready");
+      err.code = "CONFLICT";
+      throw err;
+    }
+
+    this.publishSpeechEvent({ type: "dictation.accepted", sessionId: id, session: { ...session } });
+    return session;
+  }
+
+  _requireSpeechSession(id) {
+    if (!this._speechSession || this._speechSession.id !== id) {
+      const err = new Error(`Speech session ${id} not found`);
+      err.code = "NOT_FOUND";
+      throw err;
+    }
+    return this._speechSession;
+  }
+
+  _stopSpeechSession(id) {
+    const session = this._requireSpeechSession(id);
+    session.state = "stopping";
+    this.publishSpeechEvent({ type: "dictation.stopping", sessionId: id });
+    this.ipcHandlers.windowManager?.sendStopDictation();
+    return session;
+  }
+
+  _cancelSpeechSession(id) {
+    const session = this._requireSpeechSession(id);
+    session.state = "cancelling";
+    this.ipcHandlers.windowManager?.sendCancelDictation();
+    return session;
+  }
+
+  _openSpeechEventStream(req, res, query) {
+    const sessionId = query.get("session_id") || null;
+    const lastEventId = Number(req.headers["last-event-id"] || query.get("after") || 0);
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.flushHeaders?.();
+    res.write(": connected\n\n");
+
+    for (const event of this._speechEvents) {
+      if (Number.isFinite(lastEventId) && event.id <= lastEventId) continue;
+      if (sessionId && event.session_id !== sessionId) continue;
+      res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    }
+
+    const client = {
+      res,
+      sessionId,
+      keepAliveTimer: setInterval(() => res.write(": keep-alive\n\n"), 15_000),
+    };
+    client.keepAliveTimer.unref?.();
+    this._speechClients.add(client);
+    req.on("close", () => {
+      clearInterval(client.keepAliveTimer);
+      this._speechClients.delete(client);
+    });
+  }
+
   _buildRouteTable() {
-    const exact = (method, path, handler, status) => ({
+    const exact = (method, path, handler, status, options = {}) => ({
       method,
       match: (p) => (p === path ? {} : null),
       handler,
       status,
+      ...options,
     });
     const param = (method, prefix, suffix, paramName, handler, status) => ({
       method,
@@ -297,7 +496,41 @@ class CliBridge {
     };
 
     return [
-      exact("GET", "/v1/health", () => ({ data: { ok: true, version: 1 } })),
+      exact("GET", "/v1/health", async () => ({
+        data: {
+          ok: true,
+          version: 1,
+          speech: await ipc.getSpeechProviderStatus?.(),
+        },
+      })),
+      exact("GET", "/v1/speech/status", async () => ({
+        data: {
+          ...(await ipc.getSpeechProviderStatus?.()),
+          session: this._speechSession,
+        },
+      })),
+      exact("GET", "/v1/speech/models", async () => ({
+        data: (await ipc.getSpeechProviderModels?.()) || [],
+      })),
+      exact(
+        "POST",
+        "/v1/speech/dictations",
+        ({ body }) => ({ data: this._startSpeechSession(body) }),
+        202
+      ),
+      param("POST", "/v1/speech/dictations/", "/stop", "id", ({ params }) => ({
+        data: this._stopSpeechSession(params.id),
+      })),
+      param("POST", "/v1/speech/dictations/", "/cancel", "id", ({ params }) => ({
+        data: this._cancelSpeechSession(params.id),
+      })),
+      exact(
+        "GET",
+        "/v1/speech/events",
+        ({ req, res, query }) => this._openSpeechEventStream(req, res, query),
+        undefined,
+        { stream: true }
+      ),
       exact("GET", "/v1/notes/list", ({ query }) => {
         const noteType = query.get("note_type") || null;
         const limit = query.get("limit") ? Number(query.get("limit")) : 100;

@@ -960,12 +960,32 @@ declare global {
       onToggleDictation: (callback: () => void) => () => void;
       onToggleVoiceAgent?: (callback: () => void) => () => void;
       onToggleTranslation?: (callback: () => void) => () => void;
-      onStartDictation?: (callback: () => void) => () => void;
+      onStartDictation?: (
+        callback: (options?: {
+          providerMode?: boolean;
+          sessionId?: string;
+          model?: string;
+          language?: string;
+          cleanupMode?: "none" | "incremental" | "final";
+          display?: boolean;
+          persist?: boolean;
+        }) => void
+      ) => () => void;
       onStopDictation?: (callback: () => void) => () => void;
       onPrepareDictation?: (callback: () => void) => () => void;
       onCancelDictationPreparation?: (callback: () => void) => () => void;
       micWarmHoldChanged?: (active: boolean) => void;
       dictationLifecycleStateChanged: (state: "idle" | "recording" | "processing") => void;
+      publishSpeechProviderEvent?: (event: Record<string, unknown>) => void;
+      onSpeechProviderTranscript?: (
+        callback: (payload: {
+          sessionId: string;
+          text: string;
+          committedText?: string;
+          partialText?: string;
+          finalizedSegments?: Array<{ segment: string | number; text: string }>;
+        }) => void
+      ) => () => void;
 
       // STT config
       getSttConfig?: () => Promise<

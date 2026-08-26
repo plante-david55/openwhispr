@@ -854,6 +854,10 @@ class WindowManager {
     return shouldIgnoreDictationHotkey(this._dictationLifecycleState);
   }
 
+  getDictationLifecycleState() {
+    return this._dictationLifecycleState;
+  }
+
   sendToggleDictation() {
     this._sendDictationToggle("toggle-dictation", "dictation");
   }
@@ -866,28 +870,32 @@ class WindowManager {
     this._sendDictationToggle("toggle-translation", "translation");
   }
 
-  sendStartDictation() {
-    if (!this._isOnboardingInputAllowed("dictation")) return;
+  sendStartDictation(options = {}) {
+    if (!this._isOnboardingInputAllowed("dictation")) return false;
     if (
       shouldBlockDictationWhilePanelOpen({
         assistantPanelOpen: this._assistantPanelOpen,
         assistantPanelBusy: this._assistantPanelBusy,
       })
     ) {
-      return;
+      return false;
     }
     if (this.hotkeyManager.isInListeningMode()) {
-      return;
+      return false;
     }
     if (shouldIgnoreDictationHotkey(this._dictationLifecycleState)) {
-      return;
+      return false;
     }
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      const targetPidPromise = this.textEditMonitor?.captureTargetPid?.();
-      void this.selectionManager?.captureTarget?.();
-      this.showDictationPanel({ reposition: true, targetPidPromise });
-      this.mainWindow.webContents.send("start-dictation");
+      if (!options.providerMode || options.display) {
+        const targetPidPromise = this.textEditMonitor?.captureTargetPid?.();
+        void this.selectionManager?.captureTarget?.();
+        this.showDictationPanel({ reposition: true, targetPidPromise });
+      }
+      this.mainWindow.webContents.send("start-dictation", options);
+      return true;
     }
+    return false;
   }
 
   sendStopDictation() {
