@@ -10,6 +10,8 @@ test("useAudioRecording accepts an onboarding event handler on its initial rende
     cachePrefix: "openwhispr-audio-recording-initialization-",
     mockModules: {
       "/helpers/audioManager": "export default class AudioManager {}",
+      "/helpers/incrementalCleanup.mjs": "export default class IncrementalCleanup {}",
+      "/services/ReasoningService": "export default {}",
     },
   });
   const { useAudioRecording } = await vite.ssrLoadModule("/hooks/useAudioRecording.js");
