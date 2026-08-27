@@ -33,6 +33,19 @@ const SELECTION_EDIT_DETAIL_KEY_BY_CODE = {
   paste_failed: "pasteFailed",
 };
 
+export const shouldPresentSpeechSessionLocally = (session) =>
+  !session || session.interactive === true;
+
+export const promoteInteractiveSpeechResult = (result, rawText, cleanedText) => ({
+  ...result,
+  success: true,
+  text: cleanedText,
+  rawText,
+  source: result.source?.includes("streaming")
+    ? result.source
+    : `${result.source || "local-parakeet"}-streaming`,
+});
+
 export const useAudioRecording = (toast, options = {}) => {
   const { t } = useTranslation();
   const [isRecording, setIsRecording] = useState(false);
@@ -100,6 +113,7 @@ export const useAudioRecording = (toast, options = {}) => {
       cleanupMode = "none",
       display = false,
       persist = false,
+      interactive = false,
     } = {}) => {
       if (startLockRef.current) return false;
       lastStartOptionsRef.current = { voiceAgentRequested, translationRequested };
@@ -109,8 +123,18 @@ export const useAudioRecording = (toast, options = {}) => {
       try {
         if (!audioManagerRef.current) return false;
         const providerSession = providerMode
-          ? { sessionId, model, language, cleanupMode, display, persist, state: "starting" }
+          ? {
+              sessionId,
+              model,
+              language,
+              cleanupMode,
+              display,
+              persist,
+              interactive,
+              state: "starting",
+            }
           : null;
+        const presentLocally = shouldPresentSpeechSessionLocally(providerSession);
         providerSessionRef.current = providerSession;
         audioManagerRef.current.setSpeechProviderSession(providerSession);
 
@@ -121,6 +145,7 @@ export const useAudioRecording = (toast, options = {}) => {
             cleanupSettings.useCleanupModel &&
             (cleanupModel || cleanupSettings.cleanupMode === "self-hosted")
           ) {
+            let committedCleanupText = "";
             incrementalCleanupRef.current = new IncrementalCleanup({
               cleanSegment: (text) =>
                 ReasoningService.processCleanupStreaming(text, cleanupModel, {
@@ -128,11 +153,29 @@ export const useAudioRecording = (toast, options = {}) => {
                   disableThinking: cleanupSettings.cleanupDisableThinking,
                   temperature: 0,
                 }),
-              emit: (event) =>
+              emit: (event) => {
                 window.electronAPI?.publishSpeechProviderEvent?.({
                   ...event,
                   sessionId,
-                }),
+                });
+                if (!providerSession.interactive) return;
+                if (event.type === "cleanup.committed") {
+                  committedCleanupText = event.cleaned_text || committedCleanupText;
+                }
+                if (event.type === "cleanup.delta" || event.type === "cleanup.committed") {
+                  const cleanedPreview =
+                    event.type === "cleanup.delta"
+                      ? [committedCleanupText, event.text].filter(Boolean).join(" ")
+                      : committedCleanupText;
+                  if (cleanedPreview) {
+                    window.electronAPI?.updateDictationPreview?.(cleanedPreview).catch((error) =>
+                      logger.warn("Failed to update incremental cleanup preview", {
+                        error: error?.message,
+                      })
+                    );
+                  }
+                }
+              },
             });
           } else {
             incrementalCleanupRef.current = null;
@@ -158,6 +201,9 @@ export const useAudioRecording = (toast, options = {}) => {
               code: "policy_blocked",
               message: "Dictation is blocked by workspace policy",
             });
+            if (providerSession.interactive) {
+              toast({ title: t("common.managedByOrg"), variant: "default" });
+            }
           } else {
             toast({ title: t("common.managedByOrg"), variant: "default" });
           }
@@ -183,23 +229,23 @@ export const useAudioRecording = (toast, options = {}) => {
 
         const preparationGeneration = ++preparationGenerationRef.current;
         setIsStopping(false);
-        setIsPreparing(!providerSession);
+        setIsPreparing(presentLocally);
         // Preserve the requested identity while Windows is still opening the
         // microphone; AudioManager confirms the same value once recording.
         setIsAssistantVoice(voiceAgentRequested);
-        if (!providerSession) await waitForVisualFrames();
+        if (presentLocally) await waitForVisualFrames();
         if (preparationGeneration !== preparationGenerationRef.current) return false;
 
         // Start acquisition only after the compact thinking frame has reached
         // the compositor. startRecording() joins this prepared capture, so the
         // device still opens exactly once.
-        if (!providerSession) void audioManagerRef.current.prepareMicCapture?.();
+        if (presentLocally) void audioManagerRef.current.prepareMicCapture?.();
 
         // The floating dictation panel is non-focusable, so the foreground app is
         // still the user's actual editing target here. Refresh it for recordings
         // started from the panel itself as well as from global hotkeys; otherwise
         // paste can reactivate a stale target from the preceding dictation.
-        if (!providerSession) {
+        if (presentLocally) {
           try {
             await window.electronAPI.captureDictationTarget?.();
           } catch (error) {
@@ -267,10 +313,10 @@ export const useAudioRecording = (toast, options = {}) => {
           // Cue semantics mirror performStopRecording: unconditional for
           // streaming, gated on the stop landing for batch.
           if (audioManagerRef.current.getState().isStreaming) {
-            if (!providerSession) void playStopCue();
+            if (presentLocally) void playStopCue();
             await audioManagerRef.current.stopStreamingRecording();
           } else if (audioManagerRef.current.stopRecording()) {
-            if (!providerSession) void playStopCue();
+            if (presentLocally) void playStopCue();
           }
           return didStart;
         }
@@ -278,10 +324,10 @@ export const useAudioRecording = (toast, options = {}) => {
         // A quick tap can end the recording inside the start call itself (deferred
         // streaming stop) — don't pause media for a recording that already ended. See #1060.
         if (didStart && audioManagerRef.current.getState().isRecording) {
-          if (!providerSession && getSettings().pauseMediaOnDictation) {
+          if (presentLocally && getSettings().pauseMediaOnDictation) {
             window.electronAPI?.pauseMediaPlayback?.();
           }
-          if (!providerSession) {
+          if (presentLocally) {
             window.electronAPI?.registerCancelHotkey?.("Escape");
             void playStartCue();
           }
@@ -327,16 +373,18 @@ export const useAudioRecording = (toast, options = {}) => {
       setIsStopping(true);
       // Contract to the stable thinking state before MediaRecorder/streaming
       // finalization can occupy the renderer on slower Windows machines.
-      if (!providerSessionRef.current) await waitForVisualFrames();
+      if (shouldPresentSpeechSessionLocally(providerSessionRef.current)) {
+        await waitForVisualFrames();
+      }
 
       if (currentState.isStreaming || currentState.isStreamingStartInProgress) {
-        if (!providerSessionRef.current) void playStopCue();
+        if (shouldPresentSpeechSessionLocally(providerSessionRef.current)) void playStopCue();
         return await audioManagerRef.current.stopStreamingRecording();
       }
 
       const didStop = audioManagerRef.current.stopRecording();
 
-      if (didStop && !providerSessionRef.current) {
+      if (didStop && shouldPresentSpeechSessionLocally(providerSessionRef.current)) {
         void playStopCue();
       }
 
@@ -407,6 +455,7 @@ export const useAudioRecording = (toast, options = {}) => {
       onStateChange: ({ isRecording, isProcessing, isStreaming, micCaptureStatus }) => {
         reportLifecycle(isRecording ? "recording" : isProcessing ? "processing" : "idle");
         const providerSession = providerSessionRef.current;
+        const presentLocally = shouldPresentSpeechSessionLocally(providerSession);
         if (providerSession) {
           const nextState = isRecording ? "recording" : isProcessing ? "processing" : "idle";
           if (nextState !== "idle" && providerSession.state !== nextState) {
@@ -418,18 +467,18 @@ export const useAudioRecording = (toast, options = {}) => {
           }
         }
         if (isRecording) {
-          if (!providerSession) {
+          if (presentLocally) {
             onDemoEventRef.current?.({ kind: demoKindRef.current, status: "listening" });
           }
         } else if (isProcessing) {
-          if (!providerSession) {
+          if (presentLocally) {
             onDemoEventRef.current?.({ kind: demoKindRef.current, status: "processing" });
           }
         }
         if (!isRecording) {
           window.electronAPI?.unregisterCancelHotkey?.();
           // Resume media the instant recording ends, not after transcription.
-          if (!providerSession && wasRecordingRef.current && getSettings().pauseMediaOnDictation) {
+          if (presentLocally && wasRecordingRef.current && getSettings().pauseMediaOnDictation) {
             window.electronAPI?.resumeMediaPlayback?.();
           }
         }
@@ -448,7 +497,7 @@ export const useAudioRecording = (toast, options = {}) => {
           const unavailable = micCaptureStatus === "unavailable";
           if (unavailable && !wasMicUnavailableRef.current) {
             wasMicUnavailableRef.current = true;
-            if (!providerSession) {
+            if (presentLocally) {
               toast({
                 title: t("hooks.audioRecording.micDisconnected.title"),
                 description: t("hooks.audioRecording.micDisconnected.description"),
@@ -457,7 +506,7 @@ export const useAudioRecording = (toast, options = {}) => {
             }
           } else if (micCaptureStatus === "active" && wasMicUnavailableRef.current) {
             wasMicUnavailableRef.current = false;
-            if (!providerSession) {
+            if (presentLocally) {
               toast({
                 title: t("hooks.audioRecording.micRestored.title"),
                 description: t("hooks.audioRecording.micRestored.description"),
@@ -478,6 +527,7 @@ export const useAudioRecording = (toast, options = {}) => {
         if (error?.code === "TRANSCRIPTION_CANCELLED" || error?.code === "REASON_CANCELLED") return;
         const providerSession = providerSessionRef.current;
         if (providerSession) {
+          const presentLocally = shouldPresentSpeechSessionLocally(providerSession);
           providerSession.failed = true;
           window.electronAPI?.publishSpeechProviderEvent?.({
             type: "dictation.error",
@@ -486,7 +536,7 @@ export const useAudioRecording = (toast, options = {}) => {
             message: error?.description || error?.message || "Transcription failed",
           });
           clearProviderSession();
-          return;
+          if (!presentLocally) return;
         }
         onDemoEventRef.current?.({
           kind: demoKindRef.current,
@@ -518,6 +568,7 @@ export const useAudioRecording = (toast, options = {}) => {
         setIsStopping(false);
         const providerSession = providerSessionRef.current;
         if (providerSession) {
+          const presentLocally = shouldPresentSpeechSessionLocally(providerSession);
           window.electronAPI?.publishSpeechProviderEvent?.({
             type: "dictation.error",
             sessionId: providerSession.sessionId,
@@ -525,7 +576,7 @@ export const useAudioRecording = (toast, options = {}) => {
             message: "No audio detected",
           });
           clearProviderSession();
-          return;
+          if (!presentLocally) return;
         }
         onDemoEventRef.current?.({
           kind: demoKindRef.current,
@@ -549,7 +600,7 @@ export const useAudioRecording = (toast, options = {}) => {
             sessionId: providerSession.sessionId,
             text,
           });
-          return;
+          if (!shouldPresentSpeechSessionLocally(providerSession)) return;
         }
         onDemoEventRef.current?.({ kind: demoKindRef.current, status: "partial", text });
         setPartialTranscript(text);
@@ -576,6 +627,7 @@ export const useAudioRecording = (toast, options = {}) => {
       onTranscriptionComplete: async (result) => {
         const providerSession = providerSessionRef.current;
         if (providerSession) {
+          const interactive = providerSession.interactive === true;
           const rawText = (result.rawText ?? result.text ?? "").trim();
           if (!result.success || !rawText) {
             window.electronAPI?.publishSpeechProviderEvent?.({
@@ -585,6 +637,13 @@ export const useAudioRecording = (toast, options = {}) => {
               message: rawText ? "Transcription failed" : "No audio detected",
             });
             clearProviderSession();
+            if (interactive) {
+              showDictationError({
+                title: t("hooks.audioRecording.noAudio.title"),
+                description: t("hooks.audioRecording.noAudio.description"),
+                transcript: rawText,
+              });
+            }
             return;
           }
           window.electronAPI?.publishSpeechProviderEvent?.({
@@ -606,7 +665,7 @@ export const useAudioRecording = (toast, options = {}) => {
               text: cleanedText,
             });
           }
-          if (providerSession.persist && cleanedText) {
+          if (providerSession.persist && cleanedText && !interactive) {
             audioManagerRef.current.saveTranscription(cleanedText, rawText, {
               clientTranscriptionId: result.clientTranscriptionId,
             });
@@ -618,8 +677,13 @@ export const useAudioRecording = (toast, options = {}) => {
             text: cleanedText,
             source: result.source,
           });
-          clearProviderSession();
-          return;
+          if (interactive) {
+            result = promoteInteractiveSpeechResult(result, rawText, cleanedText);
+            clearProviderSession();
+          } else {
+            clearProviderSession();
+            return;
+          }
         }
         if (result.success) {
           dismissDictationError?.();
@@ -848,7 +912,7 @@ export const useAudioRecording = (toast, options = {}) => {
 
     const disposeStart = window.electronAPI.onStartDictation?.((startOptions) => {
       handleStart(startOptions);
-      if (!startOptions?.providerMode) onToggle?.();
+      if (!startOptions?.providerMode || startOptions?.interactive) onToggle?.();
     });
 
     const disposePrepare = window.electronAPI.onPrepareDictation?.(async () => {
@@ -870,7 +934,7 @@ export const useAudioRecording = (toast, options = {}) => {
 
     const disposeStop = window.electronAPI.onStopDictation?.(() => {
       handleStop();
-      if (!providerSessionRef.current) onToggle?.();
+      if (shouldPresentSpeechSessionLocally(providerSessionRef.current)) onToggle?.();
     });
 
     // Cleanup
@@ -907,7 +971,10 @@ export const useAudioRecording = (toast, options = {}) => {
       audioManagerRef.current.cancelPreparedMicCapture?.();
       window.electronAPI?.unregisterCancelHotkey?.();
       const state = audioManagerRef.current.getState();
-      if (!providerSessionRef.current && getSettings().pauseMediaOnDictation) {
+      if (
+        shouldPresentSpeechSessionLocally(providerSessionRef.current) &&
+        getSettings().pauseMediaOnDictation
+      ) {
         window.electronAPI?.resumeMediaPlayback?.();
       }
       // A streaming start in its mic-open phase is not yet `isStreaming`;

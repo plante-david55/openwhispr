@@ -969,6 +969,7 @@ declare global {
           cleanupMode?: "none" | "incremental" | "final";
           display?: boolean;
           persist?: boolean;
+          interactive?: boolean;
         }) => void
       ) => () => void;
       onStopDictation?: (callback: () => void) => () => void;

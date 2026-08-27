@@ -307,7 +307,7 @@ class CliBridge {
     return event;
   }
 
-  _startSpeechSession(body = {}) {
+  _startSpeechSession(body = {}, sessionOptions = {}) {
     if (this._speechSession) {
       const err = new Error(`Speech session ${this._speechSession.id} is already active`);
       err.code = "CONFLICT";
@@ -349,10 +349,13 @@ class CliBridge {
       throw err;
     }
 
+    const interactive = sessionOptions.interactive === true;
     const id = crypto.randomUUID();
     const session = {
       id,
       state: "starting",
+      activation: interactive ? "hotkey" : "provider",
+      interactive,
       provider: "nvidia",
       model,
       language: body.language || "en",
@@ -371,6 +374,7 @@ class CliBridge {
       cleanupMode: cleanup,
       display: session.display,
       persist: session.persist,
+      interactive,
     });
     if (started !== true) {
       this._speechSession = null;
@@ -381,6 +385,69 @@ class CliBridge {
 
     this.publishSpeechEvent({ type: "dictation.accepted", sessionId: id, session: { ...session } });
     return session;
+  }
+
+  startInteractiveSpeechSession() {
+    if (this._speechSession) {
+      return {
+        handled: true,
+        action: "busy",
+        session: this._speechSession,
+      };
+    }
+
+    try {
+      const session = this._startSpeechSession(
+        {
+          provider: "nvidia",
+          model: DEFAULT_STREAMING_MODEL,
+          language: "en",
+          cleanup: "incremental",
+          display: true,
+          persist: true,
+        },
+        { interactive: true }
+      );
+      return { handled: true, action: "started", session };
+    } catch (error) {
+      debugLogger.warn(
+        "Interactive streaming dictation unavailable",
+        { error: error.message, code: error.code },
+        "cli-bridge"
+      );
+      if (error.code === "VALIDATION") {
+        return { handled: false, action: "fallback", reason: error.message };
+      }
+      return { handled: true, action: "busy", reason: error.message };
+    }
+  }
+
+  toggleInteractiveSpeechSession() {
+    const session = this._speechSession;
+    if (!session) return this.startInteractiveSpeechSession();
+    if (!session.interactive || !["starting", "recording"].includes(session.state)) {
+      return { handled: true, action: "busy", session };
+    }
+    this._stopSpeechSession(session.id);
+    return { handled: true, action: "stopped", session };
+  }
+
+  stopInteractiveSpeechSession() {
+    const session = this._speechSession;
+    if (!session) return { handled: false, action: "fallback" };
+    if (!session.interactive || !["starting", "recording"].includes(session.state)) {
+      return { handled: true, action: "busy", session };
+    }
+    this._stopSpeechSession(session.id);
+    return { handled: true, action: "stopped", session };
+  }
+
+  cancelInteractiveSpeechSession() {
+    const session = this._speechSession;
+    if (!session) return { handled: false, action: "fallback" };
+    if (!session.interactive) return { handled: true, action: "busy", session };
+    this._cancelSpeechSession(session.id);
+    return { handled: true, action: "cancelled", session };
   }
 
   _requireSpeechSession(id) {
@@ -396,14 +463,14 @@ class CliBridge {
     const session = this._requireSpeechSession(id);
     session.state = "stopping";
     this.publishSpeechEvent({ type: "dictation.stopping", sessionId: id });
-    this.ipcHandlers.windowManager?.sendStopDictation();
+    this.ipcHandlers.windowManager?.sendStopDictation({ providerMode: true });
     return session;
   }
 
   _cancelSpeechSession(id) {
     const session = this._requireSpeechSession(id);
     session.state = "cancelling";
-    this.ipcHandlers.windowManager?.sendCancelDictation();
+    this.ipcHandlers.windowManager?.sendCancelDictation({ providerMode: true });
     return session;
   }
 

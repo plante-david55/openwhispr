@@ -9,21 +9,46 @@ Module._load = function loadWindowManagerWithStubs(request, parent, isMain) {
   if (request === "electron") {
     return {
       app: { on: () => undefined },
-      screen: { getPrimaryDisplay: () => ({}), getDisplayMatching: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }), getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }) },
+      screen: {
+        getPrimaryDisplay: () => ({}),
+        getDisplayMatching: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }),
+        getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }),
+      },
       BrowserWindow: class {},
       shell: {},
       dialog: {},
     };
   }
-  if (request === "./debugLogger") return { warn: () => undefined, debug: () => undefined, log: () => undefined };
+  if (request === "./debugLogger")
+    return { warn: () => undefined, debug: () => undefined, log: () => undefined };
   if (request === "./hotkeyManager") {
-    const FakeHotkeyManager = class { unregisterAll() {} isInListeningMode() { return false; } };
+    const FakeHotkeyManager = class {
+      unregisterAll() {}
+      isInListeningMode() {
+        return false;
+      }
+    };
     FakeHotkeyManager.isGlobeLikeHotkey = () => false;
     return FakeHotkeyManager;
   }
-  if (request === "./dragManager") return class { cleanup() {} async startWindowDrag() { return { success: true }; } async stopWindowDrag() { return { success: true }; } };
+  if (request === "./dragManager")
+    return class {
+      cleanup() {}
+      async startWindowDrag() {
+        return { success: true };
+      }
+      async stopWindowDrag() {
+        return { success: true };
+      }
+    };
   if (request === "./menuManager") return {};
-  if (request === "./devServerManager") return { DEV_SERVER_PORT: 5173, DEV_SERVER_URL: "http://localhost:5173", getAppFilePath: () => ({ path: "/app/index.html", query: {} }), waitForDevServer: async () => undefined };
+  if (request === "./devServerManager")
+    return {
+      DEV_SERVER_PORT: 5173,
+      DEV_SERVER_URL: "http://localhost:5173",
+      getAppFilePath: () => ({ path: "/app/index.html", query: {} }),
+      waitForDevServer: async () => undefined,
+    };
   if (request === "./dockManager") return {};
   if (request === "./i18nMain") return { i18nMain: { t: (key) => key } };
   if (request === "./windowConfig") {
@@ -38,7 +63,12 @@ Module._load = function loadWindowManagerWithStubs(request, parent, isMain) {
         COMPACT: { width: 480, height: 624 },
         EXPANDED: { width: 1000, height: 740 },
       },
-      WindowPositionUtil: { setupAlwaysOnTop: () => undefined, clampToWorkArea: (b) => b, getMainWindowPosition: () => ({ x: 0, y: 0 }), getNotificationPosition: () => ({ x: 0, y: 0 }) },
+      WindowPositionUtil: {
+        setupAlwaysOnTop: () => undefined,
+        clampToWorkArea: (b) => b,
+        getMainWindowPosition: () => ({ x: 0, y: 0 }),
+        getNotificationPosition: () => ({ x: 0, y: 0 }),
+      },
       fitAssistantWindowToWorkArea: (s) => s,
       fitAssistantContentWindowToWorkArea: (h) => ({ width: 466, height: h }),
       fitDictationErrorWindowToWorkArea: (s) => s,
@@ -60,9 +90,18 @@ function fakeWindow({ visible }) {
       isDestroyed: () => false,
       isVisible: () => isVisible,
       isMinimized: () => false,
-      showInactive: () => { isVisible = true; calls.push("showInactive"); },
-      show: () => { isVisible = true; calls.push("show"); },
-      hide: () => { isVisible = false; calls.push("hide"); },
+      showInactive: () => {
+        isVisible = true;
+        calls.push("showInactive");
+      },
+      show: () => {
+        isVisible = true;
+        calls.push("show");
+      },
+      hide: () => {
+        isVisible = false;
+        calls.push("hide");
+      },
       focus: () => calls.push("focus"),
       blur: () => calls.push("blur"),
       setFocusable: (value) => calls.push(`focusable:${value}`),
@@ -110,6 +149,36 @@ test("hideDictationPanel refuses while an assistant command is busy or the panel
   calls.length = 0;
   manager.hideDictationPanel();
   assert.deepEqual(calls, ["hide"]);
+});
+
+test("Foundry dictation hotkey routes through the interactive speech controller", () => {
+  const { manager } = makeManager({ visible: false });
+  const calls = [];
+  manager.setInteractiveSpeechController({
+    toggleInteractiveSpeechSession() {
+      calls.push("toggle");
+      return { handled: true, action: "started" };
+    },
+    stopInteractiveSpeechSession() {
+      calls.push("stop");
+      return { handled: true, action: "stopped" };
+    },
+  });
+
+  assert.equal(manager.sendToggleDictation(), true);
+  assert.equal(manager.sendStopDictation(), true);
+  assert.deepEqual(calls, ["toggle", "stop"]);
+});
+
+test("normal hotkey does not steal an active provider speech session", () => {
+  const { manager } = makeManager({ visible: false });
+  manager.setInteractiveSpeechController({
+    toggleInteractiveSpeechSession() {
+      return { handled: true, action: "busy" };
+    },
+  });
+
+  assert.equal(manager.sendToggleDictation(), false);
 });
 
 test("compact onboarding exposes the complete window-control contract", () => {

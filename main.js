@@ -989,6 +989,9 @@ async function startApp() {
 
   cliBridge = new CliBridge(ipcHandlers);
   ipcHandlers.setCliBridge(cliBridge);
+  if (APP_CHANNEL === "foundry") {
+    windowManager.setInteractiveSpeechController(cliBridge);
+  }
   cliBridge.start().catch((err) => {
     debugLogger.error("CLI bridge failed to start", { error: err.message });
     cliBridge = null;

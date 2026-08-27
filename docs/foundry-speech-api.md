@@ -11,6 +11,12 @@ The fork exposes a loopback-only, bearer-authenticated speech API for Foundry. I
 
 Application settings are intentionally isolated by channel. Configure the cleanup model once in the development or Foundry build; an already-downloaded local Qwen/Nemotron model remains available from the shared cache and does not need to be downloaded again.
 
+## Foundry-build hotkey
+
+The Foundry build keeps OpenWhispr's normal dictation activation available. Its existing dictation hotkey starts an interactive session with the streaming Parakeet 560 ms model and incremental cleanup, then sends the authoritative cleaned result through the normal preview, paste, clipboard, and history path.
+
+The provider API below remains a separate activation path for Foundry/Jarvis. Both activation mechanisms stay registered, but only one may own the microphone at a time: an API request receives `409 Conflict` while interactive dictation is active, and the normal dictation hotkey does not stop or steal an API-owned session.
+
 Building the Foundry AppImage does not install it:
 
 ```sh

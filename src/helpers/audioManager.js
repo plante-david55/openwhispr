@@ -1678,7 +1678,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     // whether to retain the discarded audio from the snapshot rather than live
     // manager state (which may already belong to a new recording).
     const shouldSave =
-      !this.speechProviderSession &&
+      (!this.speechProviderSession || this.speechProviderSession.interactive) &&
       shouldSaveDiscardedRecording(getSettings(), durationSeconds, usePolicyStore.getState()) &&
       (chunks.length > 0 || segments.length > 0);
     if (shouldSave) {
@@ -1924,7 +1924,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         // a manual retry — otherwise the whole utterance disappears with no
         // feedback (#1547).
         noAudioDetected = true;
-        if (this.lastAudioBlob && !this.speechProviderSession) {
+        if (
+          this.lastAudioBlob &&
+          (!this.speechProviderSession || this.speechProviderSession.interactive)
+        ) {
           this.saveFailedTranscription(error.message, error.code, metadata);
         }
       } else if (error.message === "No audio detected") {
@@ -1940,7 +1943,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         });
 
         // Save failed transcription with audio so the user can retry later
-        if (this.lastAudioBlob && !this.speechProviderSession) {
+        if (
+          this.lastAudioBlob &&
+          (!this.speechProviderSession || this.speechProviderSession.interactive)
+        ) {
           this.saveFailedTranscription(error.message, error.code || null, metadata);
         }
       }
@@ -4944,6 +4950,8 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
   shouldShowPreviewCleanupState() {
     const settings = this.getActiveSettings();
     return (
+      (this.speechProviderSession?.interactive &&
+        this.speechProviderSession.cleanupMode !== "none") ||
       !!settings.useCleanupModel ||
       !!settings.useDictationAgent ||
       (this.translationRequested && !!settings.useDictationTranslation)
