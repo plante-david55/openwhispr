@@ -535,12 +535,86 @@ class ReasoningService extends BaseReasoningService {
     }
   }
 
+  async *processCleanupStreaming(
+    text: string,
+    model: string = "",
+    config: ReasoningConfig = {}
+  ): AsyncGenerator<string, void, unknown> {
+    let provider = config.provider;
+    ({ model, provider, config } = this.resolveManagedScope(
+      model,
+      provider,
+      config,
+      "dictationCleanup"
+    ));
+
+    const settings = getSettings();
+    const isImplicitCleanup =
+      provider === undefined && config.baseUrl === undefined && config.lanUrl === undefined;
+    if (isImplicitCleanup) {
+      provider =
+        settings.cleanupMode === "self-hosted"
+          ? "lan"
+          : settings.cleanupMode === "openwhispr"
+            ? "openwhispr"
+            : settings.cleanupProvider || undefined;
+      if (provider === "custom") {
+        config = {
+          ...config,
+          baseUrl: settings.cleanupCloudBaseUrl,
+          customApiKey: config.customApiKey ?? settings.cleanupCustomApiKey,
+        };
+      }
+    }
+
+    const resolvedProvider =
+      provider === "lan" || config.lanUrl
+        ? "lan"
+        : resolveInferenceProvider(provider, model?.trim?.() || "");
+    if (!resolvedProvider) throw new Error("No cleanup provider selected");
+    if (!model?.trim() && resolvedProvider !== "openwhispr" && resolvedProvider !== "lan") {
+      throw new Error("No cleanup model selected");
+    }
+
+    const messages = [
+      { role: "system", content: config.systemPrompt || this.getSystemPrompt(null) },
+      { role: "user", content: wrapCleanupTranscript(text) },
+    ];
+    const abortController = new AbortController();
+    this.activeRequestControllers.add(abortController);
+    try {
+      yield* this.processTextStreamingRaw(
+        messages,
+        model,
+        resolvedProvider,
+        {
+          ...config,
+          provider: resolvedProvider,
+          maxTokens:
+            config.maxTokens ||
+            this.calculateMaxTokens(
+              text.length,
+              TOKEN_LIMITS.MIN_TOKENS,
+              TOKEN_LIMITS.MAX_TOKENS,
+              TOKEN_LIMITS.TOKEN_MULTIPLIER
+            ),
+          systemPrompt: messages[0].content,
+        },
+        abortController,
+        { requiresAgent: false }
+      );
+    } finally {
+      this.activeRequestControllers.delete(abortController);
+    }
+  }
+
   private async *processTextStreamingRaw(
     messages: Array<{ role: string; content: string }>,
     model: string,
     provider: string,
     config: ReasoningConfig & { systemPrompt: string },
-    abortController: AbortController
+    abortController: AbortController,
+    { requiresAgent = true }: { requiresAgent?: boolean } = {}
   ): AsyncGenerator<string, void, unknown> {
     const route = resolveChatRoute({
       provider,
@@ -549,7 +623,11 @@ class ReasoningService extends BaseReasoningService {
     });
     const mode: InferenceMode =
       route.kind === "self-hosted" ? "self-hosted" : route.kind === "local" ? "local" : "providers";
-    assertAgentSessionAllowedByPolicy(provider, mode);
+    if (requiresAgent) {
+      assertAgentSessionAllowedByPolicy(provider, mode);
+    } else {
+      assertReasoningAllowedByPolicy(provider, mode);
+    }
     const isLocalProvider = route.kind === "local";
     const isLanChat = route.kind === "self-hosted";
 

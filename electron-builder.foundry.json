@@ -1,0 +1,32 @@
+{
+  "extends": "./electron-builder.json",
+  "appId": "com.plantedavid.openwhispr.foundry",
+  "productName": "OpenWhispr Foundry",
+  "executableName": "openwhispr-foundry",
+  "extraMetadata": {
+    "desktopName": "openwhispr-foundry.desktop",
+    "openwhisprChannel": "foundry",
+    "openwhisprUpdateOwner": "plante-david55",
+    "openwhisprUpdateRepo": "openwhispr"
+  },
+  "protocols": {
+    "name": "OpenWhispr Foundry Protocol",
+    "schemes": ["openwhispr-foundry"]
+  },
+  "directories": {
+    "output": "dist-foundry"
+  },
+  "linux": {
+    "target": ["AppImage"],
+    "icon": "src/assets/icon.png",
+    "category": "Utility",
+    "artifactName": "OpenWhispr-Foundry-${version}-${os}-${arch}.${ext}"
+  },
+  "publish": {
+    "provider": "github",
+    "owner": "plante-david55",
+    "repo": "openwhispr",
+    "private": false,
+    "releaseType": "release"
+  }
+}

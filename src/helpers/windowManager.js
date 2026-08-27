@@ -88,6 +88,7 @@ class WindowManager {
     this._activeHorizontalDirection = null;
     this._isDictatingToggle = false;
     this._dictationLifecycleState = DICTATION_LIFECYCLE.IDLE;
+    this._interactiveSpeechController = null;
     this._assistantPanelOpen = false;
     this._assistantPanelBusy = false;
     this._pendingMeetingNoteNavigation = null;
@@ -854,8 +855,36 @@ class WindowManager {
     return shouldIgnoreDictationHotkey(this._dictationLifecycleState);
   }
 
+  getDictationLifecycleState() {
+    return this._dictationLifecycleState;
+  }
+
+  setInteractiveSpeechController(controller) {
+    this._interactiveSpeechController = controller || null;
+  }
+
+  _routeInteractiveDictation(method) {
+    const controller = this._interactiveSpeechController;
+    if (!controller || typeof controller[method] !== "function") return null;
+    try {
+      return controller[method]();
+    } catch (error) {
+      debugLogger.error(
+        "Interactive streaming dictation routing failed",
+        { method, error: error.message },
+        "cli-bridge"
+      );
+      // An unexpected controller failure may have happened after it claimed
+      // the microphone. Fail closed instead of starting the legacy path too.
+      return { handled: true, action: "busy", reason: error.message };
+    }
+  }
+
   sendToggleDictation() {
+    const routed = this._routeInteractiveDictation("toggleInteractiveSpeechSession");
+    if (routed?.handled) return routed.action !== "busy";
     this._sendDictationToggle("toggle-dictation", "dictation");
+    return true;
   }
 
   sendToggleVoiceAgent() {
@@ -866,40 +895,54 @@ class WindowManager {
     this._sendDictationToggle("toggle-translation", "translation");
   }
 
-  sendStartDictation() {
-    if (!this._isOnboardingInputAllowed("dictation")) return;
+  sendStartDictation(options = {}) {
+    if (!options.providerMode) {
+      const routed = this._routeInteractiveDictation("startInteractiveSpeechSession");
+      if (routed?.handled) return routed.action === "started";
+    }
+    if (!this._isOnboardingInputAllowed("dictation")) return false;
     if (
       shouldBlockDictationWhilePanelOpen({
         assistantPanelOpen: this._assistantPanelOpen,
         assistantPanelBusy: this._assistantPanelBusy,
       })
     ) {
-      return;
+      return false;
     }
     if (this.hotkeyManager.isInListeningMode()) {
-      return;
+      return false;
     }
     if (shouldIgnoreDictationHotkey(this._dictationLifecycleState)) {
-      return;
+      return false;
     }
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      const targetPidPromise = this.textEditMonitor?.captureTargetPid?.();
-      void this.selectionManager?.captureTarget?.();
-      this.showDictationPanel({ reposition: true, targetPidPromise });
-      this.mainWindow.webContents.send("start-dictation");
+      if (!options.providerMode || options.display) {
+        const targetPidPromise = this.textEditMonitor?.captureTargetPid?.();
+        void this.selectionManager?.captureTarget?.();
+        this.showDictationPanel({ reposition: true, targetPidPromise });
+      }
+      this.mainWindow.webContents.send("start-dictation", options);
+      return true;
     }
+    return false;
   }
 
-  sendStopDictation() {
+  sendStopDictation(options = {}) {
+    if (!options.providerMode) {
+      const routed = this._routeInteractiveDictation("stopInteractiveSpeechSession");
+      if (routed?.handled) return routed.action === "stopped";
+    }
     if (shouldBlockDictationWhilePanelOpen({ assistantPanelOpen: this._assistantPanelOpen })) {
-      return;
+      return false;
     }
     if (this.hotkeyManager.isInListeningMode()) {
-      return;
+      return false;
     }
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
       this.mainWindow.webContents.send("stop-dictation");
+      return true;
     }
+    return false;
   }
 
   sendPrepareDictation({ inputKind = "dictation", voiceAgentRequested = false } = {}) {
@@ -930,14 +973,20 @@ class WindowManager {
     }
   }
 
-  sendCancelDictation() {
+  sendCancelDictation(options = {}) {
+    if (!options.providerMode) {
+      const routed = this._routeInteractiveDictation("cancelInteractiveSpeechSession");
+      if (routed?.handled) return routed.action === "cancelled";
+    }
     if (this.hotkeyManager.isInListeningMode()) {
-      return;
+      return false;
     }
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
       this.mainWindow.webContents.send("cancel-dictation-preparation");
       this.mainWindow.webContents.send("cancel-hotkey-pressed");
+      return true;
     }
+    return false;
   }
 
   getActivationMode() {

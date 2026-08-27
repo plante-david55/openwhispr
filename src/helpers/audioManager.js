@@ -510,6 +510,7 @@ class AudioManager {
     this.lastAudioMetadata = null;
     this._localSpeechGateState = null;
     this._streamingCommitActive = false;
+    this.speechProviderSession = null;
     this._previewFlushResolve = null;
     this._batchSegments = [];
     this._rotatingBatchRecorder = null;
@@ -663,6 +664,28 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     this.onPartialTranscript = onPartialTranscript;
     this.onStreamingCommit = onStreamingCommit;
     this.onTranslationFallback = onTranslationFallback;
+  }
+
+  setSpeechProviderSession(session) {
+    this.speechProviderSession = session || null;
+  }
+
+  getActiveSettings() {
+    const settings = getSettings();
+    const session = this.speechProviderSession;
+    if (!session) return settings;
+    return {
+      ...settings,
+      useLocalWhisper: true,
+      localTranscriptionProvider: "nvidia",
+      parakeetModel: session.model || settings.parakeetModel,
+      preferredLanguage: session.language || settings.preferredLanguage,
+      showTranscriptionPreview: session.display === true,
+      useCleanupModel: session.cleanupMode === "final" ? settings.useCleanupModel : false,
+      allowOpenAIFallback: false,
+      useDictationAgent: false,
+      useDictationTranslation: false,
+    };
   }
 
   // Fail-open: translation degraded/failed but raw text is still pasted. Surface why.
@@ -1251,7 +1274,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         localTranscriptionProvider,
         whisperModel,
         parakeetModel,
-      } = getSettings();
+      } = this.getActiveSettings();
       const isNvidia = localTranscriptionProvider === "nvidia";
       // Online models stream+commit during capture, so PCM runs even with preview off.
       const streamingCommit = useLocalWhisper && isNvidia && isOnlineParakeetModel(parakeetModel);
@@ -1277,7 +1300,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
 
           const provider = isNvidia ? "nvidia" : "whisper";
           const model = isNvidia ? parakeetModel : whisperModel;
-          const language = getBaseLanguageCode(getSettings().preferredLanguage);
+          const language = getBaseLanguageCode(this.getActiveSettings().preferredLanguage);
           window.electronAPI?.startDictationPreview?.({
             provider,
             model,
@@ -1655,6 +1678,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     // whether to retain the discarded audio from the snapshot rather than live
     // manager state (which may already belong to a new recording).
     const shouldSave =
+      (!this.speechProviderSession || this.speechProviderSession.interactive) &&
       shouldSaveDiscardedRecording(getSettings(), durationSeconds, usePolicyStore.getState()) &&
       (chunks.length > 0 || segments.length > 0);
     if (shouldSave) {
@@ -1745,7 +1769,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     if (processingPipeline && this._activeProcessingPipeline !== processingPipeline) return;
     const wasCancelled = () => this._shouldAbandonProcessingPipeline(pipeline);
     const pipelineStart = performance.now();
-    const settings = getSettings();
+    const settings = this.getActiveSettings();
     let noAudioDetected = false;
     const speechGateDecision = getLocalSpeechGateDecision(this._localSpeechGateState);
     this._localSpeechGateState = null;
@@ -1842,7 +1866,12 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       result = withSalvageWarning(result, metadata.salvagedRecording);
 
       result = { ...result, ...this._takePendingResultExtras() };
-      this.onTranscriptionComplete?.(result);
+      const providerSessionActive = !!this.speechProviderSession;
+      const completion = this.onTranscriptionComplete?.(result);
+      // Provider mode owns its cleaned terminal event. Keep the shared
+      // dictation lifecycle busy until that async cleanup has actually
+      // completed so a normal hotkey cannot overlap and steal the session.
+      if (providerSessionActive && completion?.then) await completion;
 
       if (result?.source === "openwhispr") {
         window.dispatchEvent(new Event("usage-changed"));
@@ -1895,7 +1924,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         // a manual retry — otherwise the whole utterance disappears with no
         // feedback (#1547).
         noAudioDetected = true;
-        if (this.lastAudioBlob) {
+        if (
+          this.lastAudioBlob &&
+          (!this.speechProviderSession || this.speechProviderSession.interactive)
+        ) {
           this.saveFailedTranscription(error.message, error.code, metadata);
         }
       } else if (error.message === "No audio detected") {
@@ -1911,7 +1943,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         });
 
         // Save failed transcription with audio so the user can retry later
-        if (this.lastAudioBlob) {
+        if (
+          this.lastAudioBlob &&
+          (!this.speechProviderSession || this.speechProviderSession.interactive)
+        ) {
           this.saveFailedTranscription(error.message, error.code || null, metadata);
         }
       }
@@ -1938,7 +1973,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       // Send original audio to main process - FFmpeg in main process handles conversion
       // (renderer-side AudioContext conversion was unreliable with WebM/Opus format)
       const arrayBuffer = await audioBlob.arrayBuffer();
-      const language = getBaseLanguageCode(this.getEffectiveSttLanguage(getSettings()));
+      const language = getBaseLanguageCode(this.getEffectiveSttLanguage(this.getActiveSettings()));
       const options = { model };
       if (language) {
         options.language = language;
@@ -2693,7 +2728,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
 
     const cleanupModel = getEffectiveCleanupModel();
     const isCloud = isCloudCleanupMode();
-    const settings = getSettings();
+    const settings = this.getActiveSettings();
     const cleanupProvider = settings.cleanupProvider || "auto";
     const cleanupReachable = !!settings.useCleanupModel && (!!cleanupModel || isCloud);
     const agentReachable = dictationAgentReachable(settings);
@@ -2988,7 +3023,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     }
 
     const timings = {};
-    const settings = getSettings();
+    const settings = this.getActiveSettings();
     const language = getBaseLanguageCode(this.getEffectiveSttLanguage(settings));
 
     const arrayBuffer = await audioBlob.arrayBuffer();
@@ -3765,7 +3800,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
   }
 
   shouldUseStreaming(isSignedInOverride) {
-    const s = getSettings();
+    const s = this.getActiveSettings();
     if (s.useLocalWhisper) return false;
 
     // Self-hosted transcription is batch HTTP to the user's server, never cloud realtime WS.
@@ -4834,7 +4869,8 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         model: streamingSttModel || null,
       };
       if (wasCancelled()) return true;
-      this.onTranscriptionComplete?.({
+      const providerSessionActive = !!this.speechProviderSession;
+      const completion = this.onTranscriptionComplete?.({
         success: true,
         text: finalText,
         rawText: rawStreamingText || finalText,
@@ -4842,6 +4878,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         ...this._takePendingResultExtras(),
         ...(batchWarning ? { warning: batchWarning } : {}),
       });
+      // Provider sessions keep the lifecycle in processing until incremental
+      // cleanup emits its authoritative final event. Normal dictation preserves
+      // the existing fire-and-forget callback behavior.
+      if (providerSessionActive && completion?.then) await completion;
 
       if (!usedBatchFallback) {
         (async () => {
@@ -4894,7 +4934,8 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     if (!finalText) {
       // Match the batch pipeline: settle processing first, then publish the
       // empty outcome so the warning cannot interrupt the thinking transition.
-      this.onTranscriptionComplete?.({ success: true, text: "" });
+      const completion = this.onTranscriptionComplete?.({ success: true, text: "" });
+      if (this.speechProviderSession && completion?.then) await completion;
     }
 
     if (this.shouldUseStreaming()) {
@@ -4907,8 +4948,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
   }
 
   shouldShowPreviewCleanupState() {
-    const settings = getSettings();
+    const settings = this.getActiveSettings();
     return (
+      (this.speechProviderSession?.interactive &&
+        this.speechProviderSession.cleanupMode !== "none") ||
       !!settings.useCleanupModel ||
       !!settings.useDictationAgent ||
       (this.translationRequested && !!settings.useDictationTranslation)

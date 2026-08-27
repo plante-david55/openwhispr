@@ -48,6 +48,19 @@
       "extractDir": "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming",
       "descriptionKey": "models.descriptions.parakeet.parakeet_unified_en_0_6b"
     },
+    "parakeet-unified-en-0.6b-streaming-560ms": {
+      "name": "Parakeet Unified EN 0.6B Streaming (560 ms)",
+      "description": "English-only streaming Parakeet Unified with a 560 ms latency profile",
+      "size": "631MB",
+      "sizeMb": 631,
+      "expectedSizeBytes": 501360769,
+      "language": "en",
+      "supportedLanguages": ["en"],
+      "runtime": "online",
+      "downloadUrl": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms.tar.bz2",
+      "extractDir": "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms",
+      "descriptionKey": "models.descriptions.parakeet.parakeet_unified_en_0_6b"
+    },
     "nemotron-speech-streaming-en-0.6b": {
       "name": "Nemotron Speech Streaming EN 0.6B",
       "description": "English streaming ASR from NVIDIA Nemotron",

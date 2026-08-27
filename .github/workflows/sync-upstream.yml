@@ -1,0 +1,38 @@
+name: Propose upstream sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    if: github.repository == 'plante-david55/openwhispr'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream into a review branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/OpenWhispr/openwhispr.git
+          git fetch upstream main
+          git checkout -B automation/upstream-sync origin/main
+          git merge --no-edit upstream/main
+          git push --force-with-lease origin automation/upstream-sync
+
+      - name: Open or refresh pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh pr list --base main --head automation/upstream-sync --state open --json number --jq '.[0].number')
+          if [ -z "$existing" ]; then
+            gh pr create --base main --head automation/upstream-sync --title "chore: sync OpenWhispr upstream" --body "Automated weekly upstream merge for review. Resolve conflicts and run the speech-provider regression suite before merging."
+          fi

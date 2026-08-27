@@ -27,10 +27,16 @@ class UpdateManager {
       return;
     }
 
+    const packageMetadata = require("../package.json");
+    const updateOwner =
+      process.env.OPENWHISPR_UPDATE_OWNER || packageMetadata.openwhisprUpdateOwner || "OpenWhispr";
+    const updateRepo =
+      process.env.OPENWHISPR_UPDATE_REPO || packageMetadata.openwhisprUpdateRepo || "openwhispr";
+
     autoUpdater.setFeedURL({
       provider: "github",
-      owner: "OpenWhispr",
-      repo: "openwhispr",
+      owner: updateOwner,
+      repo: updateRepo,
       private: false,
     });
 

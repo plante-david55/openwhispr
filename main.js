@@ -41,10 +41,11 @@ try {
   });
 }
 
-const VALID_CHANNELS = new Set(["development", "staging", "production"]);
+const VALID_CHANNELS = new Set(["development", "staging", "production", "foundry"]);
 const DEFAULT_OAUTH_PROTOCOL_BY_CHANNEL = {
   development: "openwhispr-dev",
   staging: "openwhispr-staging",
+  foundry: "openwhispr-foundry",
   production: "openwhispr",
 };
 const BASE_WINDOWS_APP_ID = "com.gizmolabs.openwhispr";
@@ -74,6 +75,9 @@ function resolveAppChannel() {
   if (VALID_CHANNELS.has(rawChannel)) {
     return rawChannel;
   }
+
+  const packagedChannel = require("./package.json").openwhisprChannel;
+  if (VALID_CHANNELS.has(packagedChannel)) return packagedChannel;
 
   return inferDefaultChannel();
 }
@@ -124,7 +128,9 @@ if (process.platform === "linux" && process.env.XDG_SESSION_TYPE === "wayland") 
 // Set desktop filename so Wayland compositors can match windows to the .desktop entry.
 // This allows XDG portals (e.g. PipeWire) to persist permissions across sessions.
 if (process.platform === "linux") {
-  app.setDesktopName("open-whispr.desktop");
+  app.setDesktopName(
+    APP_CHANNEL === "foundry" ? "openwhispr-foundry.desktop" : "open-whispr.desktop"
+  );
 }
 
 // Group all windows under single taskbar entry on Windows
@@ -982,6 +988,10 @@ async function startApp() {
   startAuthBridgeServer();
 
   cliBridge = new CliBridge(ipcHandlers);
+  ipcHandlers.setCliBridge(cliBridge);
+  if (APP_CHANNEL === "foundry") {
+    windowManager.setInteractiveSpeechController(cliBridge);
+  }
   cliBridge.start().catch((err) => {
     debugLogger.error("CLI bridge failed to start", { error: err.message });
     cliBridge = null;

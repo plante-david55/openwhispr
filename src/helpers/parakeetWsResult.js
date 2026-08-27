@@ -23,6 +23,16 @@ function createOnlineAccumulator() {
       : finalizedText || partialText;
   };
 
+  const snapshot = () => ({
+    text: text(),
+    committedText: Array.from(finalizedSegments.values()).join(" "),
+    partialText,
+    finalizedSegments: Array.from(finalizedSegments.entries()).map(([segment, value]) => ({
+      segment,
+      text: value,
+    })),
+  });
+
   return {
     push(message) {
       let parsed;
@@ -31,15 +41,15 @@ function createOnlineAccumulator() {
       } catch {
         parsed = { text: message };
       }
-      if (!parsed || typeof parsed !== "object") return text();
+      if (!parsed || typeof parsed !== "object") return snapshot();
 
       const messageText = String(parsed.text ?? "").trim();
-      if (!messageText) return text();
+      if (!messageText) return snapshot();
 
       if (!parsed.is_final) {
         partialText = finalizedSegments.has(parsed.segment) ? "" : messageText;
         partialSegment = parsed.segment ?? null;
-        return text();
+        return snapshot();
       }
 
       const segment = parsed.segment ?? `fallback:${fallbackKey++}`;
@@ -48,9 +58,10 @@ function createOnlineAccumulator() {
         partialText = "";
         partialSegment = null;
       }
-      return text();
+      return snapshot();
     },
     text,
+    snapshot,
   };
 }
 

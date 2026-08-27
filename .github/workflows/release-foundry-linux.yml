@@ -1,0 +1,64 @@
+name: Release Foundry Linux build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver for the side-by-side Foundry build (for example 1.9.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.repository == 'plante-david55/openwhispr'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Validate requested version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: node -e "if (!/^\\d+\\.\\d+\\.\\d+$/.test(process.env.RELEASE_VERSION)) process.exit(1)"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set build version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Run quality and speech-provider tests
+        run: |
+          npm run quality-check
+          node --import tsx --test test/helpers/cliBridgeSpeech.test.js test/helpers/cliBridgeRequestBody.test.js test/helpers/incrementalCleanup.test.js test/helpers/parakeetWsResult.test.js test/helpers/parakeetModelRegistry.test.js
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm libx11-dev libxtst-dev libatspi2.0-dev libglib2.0-dev libpipewire-0.3-dev pkg-config
+
+      - name: Create runtime environment
+        run: |
+          touch .env
+          echo "MICROSOFT_CALENDAR_CLIENT_ID=${{ secrets.MICROSOFT_CALENDAR_CLIENT_ID }}" >> .env
+          echo "GOOGLE_CALENDAR_CLIENT_ID=${{ secrets.GOOGLE_CALENDAR_CLIENT_ID }}" >> .env
+          echo "GOOGLE_CALENDAR_CLIENT_SECRET=${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}" >> .env
+
+      - name: Prepare native helpers and sidecars
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run prebuild:linux
+
+      - name: Build and publish side-by-side AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npm run build:linux:foundry -- --publish always

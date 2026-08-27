@@ -15,8 +15,11 @@ function makeAutoUpdater({ offline = false } = {}) {
   const listeners = {};
   const autoUpdater = {
     calls: 0,
+    feed: null,
     listeners,
-    setFeedURL() {},
+    setFeedURL(feed) {
+      autoUpdater.feed = feed;
+    },
     on(event, handler) {
       listeners[event] = handler;
     },
@@ -67,6 +70,23 @@ beforeEach((t) => {
 
 afterEach(() => {
   Module._load = originalLoad;
+  delete process.env.OPENWHISPR_UPDATE_OWNER;
+  delete process.env.OPENWHISPR_UPDATE_REPO;
+});
+
+test("a fork build can use its own update feed", () => {
+  process.env.OPENWHISPR_UPDATE_OWNER = "plante-david55";
+  process.env.OPENWHISPR_UPDATE_REPO = "openwhispr";
+  const autoUpdater = makeAutoUpdater();
+  const manager = createUpdateManager(autoUpdater);
+
+  assert.deepEqual(autoUpdater.feed, {
+    provider: "github",
+    owner: "plante-david55",
+    repo: "openwhispr",
+    private: false,
+  });
+  manager.cleanup();
 });
 
 test("with App updates off, startup and periodic checks never reach the update feed", (t) => {
