@@ -34,8 +34,11 @@ test("interactive provider completion is promoted into the normal streaming resu
       "/services/ReasoningService": "export default {}",
     },
   });
-  const { promoteInteractiveSpeechResult, shouldPresentSpeechSessionLocally } =
-    await vite.ssrLoadModule("/hooks/useAudioRecording.js");
+  const {
+    isSpeechSessionTranscriptionAllowed,
+    promoteInteractiveSpeechResult,
+    shouldPresentSpeechSessionLocally,
+  } = await vite.ssrLoadModule("/hooks/useAudioRecording.js");
 
   assert.equal(shouldPresentSpeechSessionLocally(null), true);
   assert.equal(shouldPresentSpeechSessionLocally({ interactive: false }), false);
@@ -52,5 +55,28 @@ test("interactive provider completion is promoted into the normal streaming resu
       rawText: "raw",
       source: "local-parakeet-streaming",
     }
+  );
+
+  const localOnlyPolicy = {
+    status: "managed",
+    appVersion: "1.9.0",
+    policy: {
+      minAppVersion: null,
+      transcription: { allowedModes: ["local"], allowedByokProviders: [] },
+    },
+  };
+  const unrelatedSavedRoute = {
+    transcriptionMode: "providers",
+    cloudTranscriptionProvider: "custom",
+  };
+  assert.equal(
+    isSpeechSessionTranscriptionAllowed(localOnlyPolicy, unrelatedSavedRoute, {
+      interactive: true,
+    }),
+    true
+  );
+  assert.equal(
+    isSpeechSessionTranscriptionAllowed(localOnlyPolicy, unrelatedSavedRoute, null),
+    false
   );
 });

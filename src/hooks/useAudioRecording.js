@@ -14,6 +14,7 @@ import {
   isAgentAllowed,
   isScreenContextAllowed,
   isTranscriptionContextAllowed,
+  isTranscriptionSelectionAllowed,
 } from "../stores/policyRules";
 import { usePolicyStore } from "../stores/policyStore";
 import { getOnboardingDemoKind } from "../utils/onboardingDemo";
@@ -45,6 +46,11 @@ export const promoteInteractiveSpeechResult = (result, rawText, cleanedText) => 
     ? result.source
     : `${result.source || "local-parakeet"}-streaming`,
 });
+
+export const isSpeechSessionTranscriptionAllowed = (policyState, settings, providerSession) =>
+  providerSession
+    ? isTranscriptionSelectionAllowed(policyState, { mode: "local", provider: "nvidia" })
+    : isTranscriptionContextAllowed(policyState, settings, "dictation");
 
 export const useAudioRecording = (toast, options = {}) => {
   const { t } = useTranslation();
@@ -190,7 +196,7 @@ export const useAudioRecording = (toast, options = {}) => {
         }
         const policyState = usePolicyStore.getState();
         if (
-          !isTranscriptionContextAllowed(policyState, getSettings(), "dictation") ||
+          !isSpeechSessionTranscriptionAllowed(policyState, getSettings(), providerSession) ||
           (voiceAgentRequested && !isAgentAllowed(policyState))
         ) {
           if (providerSession) {
